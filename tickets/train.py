@@ -14,6 +14,7 @@ import json
 import logging
 import subprocess
 from datetime import UTC, datetime
+from typing import Any
 
 import joblib
 import numpy as np
@@ -131,7 +132,7 @@ def train(n_rows: int = 8_000) -> dict:
 
     predictions = pipeline.predict(X_test)
     report = classification_report(y_test, predictions, output_dict=True, zero_division=0)
-    metrics = {
+    metrics: dict[str, Any] = {
         "macro_f1": float(f1_score(y_test, predictions, average="macro")),
         "accuracy": float(accuracy_score(y_test, predictions)),
         "per_class_f1": {c: float(report[c]["f1-score"]) for c in config.CLASSES},

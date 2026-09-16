@@ -1,4 +1,4 @@
-.PHONY: help install train test lint serve up down logs traffic drift clean
+.PHONY: help install train test lint typecheck serve up down logs traffic drift clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -6,12 +6,16 @@ help:
 install: ## Install dev dependencies and the package itself (editable)
 	pip install -r requirements-dev.txt
 	pip install -e .
+	pre-commit install
 
 train: ## Train the model and write artifacts/
 	python -m tickets.train
 
 lint: ## Ruff
 	ruff check tickets tests scripts
+
+typecheck: ## Mypy
+	mypy tickets scripts
 
 test: ## Run the full test suite (includes the model quality gate)
 	pytest -v

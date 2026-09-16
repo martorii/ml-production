@@ -25,6 +25,9 @@ jobs:
       - name: Lint
         run: ruff check tickets tests scripts
 
+      - name: Type check
+        run: mypy tickets scripts
+
       - name: Train model
         run: python -m tickets.train
 
