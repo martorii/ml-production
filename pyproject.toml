@@ -1,0 +1,19 @@
+[project]
+name = "ticket-router"
+version = "2.0.0"
+description = "Minimal production-shaped text classification service: train, serve, monitor."
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["tickets*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

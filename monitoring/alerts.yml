@@ -1,0 +1,72 @@
+groups:
+  - name: ticket-router-service
+    rules:
+      - alert: TicketApiDown
+        expr: up{job="tickets-api"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Ticket routing API is not being scraped"
+
+      - alert: HighPredictionLatency
+        expr: histogram_quantile(0.95, sum(rate(tickets_prediction_latency_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 inference latency above 100ms"
+
+      - alert: PredictionErrors
+        expr: rate(tickets_prediction_errors_total{reason!="validation_error"}[5m]) > 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Prediction requests are failing"
+
+      - alert: HighRejectionRate
+        # Callers sending garbage is their bug, not ours — but it is still an incident,
+        # and it is invisible unless something watches for it.
+        expr: |
+          sum(rate(tickets_rejected_requests_total[5m]))
+          / clamp_min(sum(rate(tickets_predictions_total[5m])) + sum(rate(tickets_rejected_requests_total[5m])), 0.001) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 10% of incoming tickets are being rejected by validation"
+
+  - name: ticket-router-model
+    rules:
+      # Any single drift signal can fire on a quiet news day. Two at once is a pattern.
+      - alert: TextDriftDetected
+        expr: tickets_drifted_signal_count >= 2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} drift signals firing simultaneously"
+          description: "Incoming tickets no longer look like training data. Investigate, then retrain."
+
+      - alert: UnseenVocabularySpike
+        # The signal unique to text: words the vectorizer has never seen. A product
+        # rename, a new market, or another language shows up here first. Like the
+        # embedding threshold, the bar is calibrated at training time, not guessed.
+        expr: tickets_oov_token_rate > tickets_oov_token_rate_threshold
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of incoming tokens are out of vocabulary"
+
+      - alert: EmbeddingDriftAboveCalibratedThreshold
+        # Threshold is not hardcoded: it is bootstrapped from training data at train
+        # time and re-exported on every retrain, so it follows the model it belongs to.
+        expr: tickets_embedding_drift_distance > tickets_embedding_drift_threshold
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Live tickets sit further from the training centroid than calibration allows"
+
+      - alert: ModelLosingConfidence
+        expr: tickets_low_confidence_rate > 0.25
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Over a quarter of routings are low-confidence"
+          description: "Earliest sign of a domain shift, and it needs no ground-truth labels."

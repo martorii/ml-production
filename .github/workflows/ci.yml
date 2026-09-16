@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint, train, quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Lint
+        run: ruff check tickets tests scripts
+
+      - name: Train model
+        run: python -m tickets.train
+
+      # The quality gate. If held-out macro F1, accuracy or any per-class F1 falls below the
+      # thresholds in tickets/config.py, this step fails and nothing ships.
+      - name: Model quality gate
+        run: pytest tests/test_model_quality.py -v
+
+      - name: Data, text, API and drift tests
+        run: pytest tests/test_data.py tests/test_text.py tests/test_api.py tests/test_monitoring.py -v
+
+      - name: Publish metrics to the job summary
+        if: always()
+        run: |
+          echo '### Model metrics' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/metrics.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-artifacts
+          path: artifacts/
+
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    # Only runs if the gate passed: a failing model never becomes an image.
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t ticket-router:${{ github.sha }} .
+      - name: Smoke test the image
+        run: |
+          docker run -d --name smoke -p 8000:8000 ticket-router:${{ github.sha }}
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/ready && break || sleep 2
+          done
+          curl -sf http://localhost:8000/health | tee /dev/stderr | grep -q '"model_loaded":true'
+          curl -sf -X POST http://localhost:8000/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"i was charged twice for my subscription this month"}' \
+            | tee /dev/stderr | grep -q '"label":"billing"'
+          docker rm -f smoke

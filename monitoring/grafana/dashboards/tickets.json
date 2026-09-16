@@ -1,0 +1,330 @@
+{
+  "uid": "ticket-router",
+  "title": "Ticket routing - health & text drift",
+  "tags": ["ml", "nlp", "tickets"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-15m", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROM",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "Prometheus"},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Service health",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "title": "Request rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 0, "y": 1, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "sum(rate(tickets_predictions_total[1m]))",
+          "legendFormat": "tickets/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "title": "Inference latency",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 8, "y": 1, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "histogram_quantile(0.50, sum(rate(tickets_prediction_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "histogram_quantile(0.95, sum(rate(tickets_prediction_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "histogram_quantile(0.99, sum(rate(tickets_prediction_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "title": "Errors & rejected input",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 16, "y": 1, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "sum(rate(tickets_prediction_errors_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "sum(rate(tickets_rejected_requests_total[5m])) by (field)",
+          "legendFormat": "rejected: {{field}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "title": "Served model version",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_model_info",
+          "legendFormat": "{{model_version}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "name"
+      },
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 5,
+      "title": "Offline macro F1 (at training)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 6, "y": 8, "w": 6, "h": 4},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_model_offline_macro_f1",
+          "legendFormat": "macro F1",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 3, "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 6,
+      "title": "Routing mix (live)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 4},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "sum(rate(tickets_predictions_total[5m])) by (predicted_class)",
+          "legendFormat": "{{predicted_class}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Text drift - five signals, no labels required",
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 7,
+      "title": "Drift signals firing",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 0, "y": 13, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_drifted_signal_count",
+          "legendFormat": "signals firing",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "max": 5,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 2}
+            ]
+          },
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Which signal",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 8, "y": 13, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_drift_detected",
+          "legendFormat": "{{signal}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "max": 1.2, "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 9,
+      "title": "Embedding drift vs calibrated threshold",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 16, "y": 13, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_embedding_drift_distance",
+          "legendFormat": "window mean distance",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_embedding_drift_threshold",
+          "legendFormat": "calibrated threshold",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 4, "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 10,
+      "title": "Out-of-vocabulary token rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 0, "y": 20, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_oov_token_rate",
+          "legendFormat": "live OOV rate",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_oov_token_rate_baseline",
+          "legendFormat": "training baseline",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 11,
+      "title": "Model confidence",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 8, "y": 20, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_mean_confidence",
+          "legendFormat": "mean confidence",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_low_confidence_rate",
+          "legendFormat": "low-confidence rate",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 12,
+      "title": "Predicted class mix vs training",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 16, "y": 20, "w": 8, "h": 7},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_predicted_class_share",
+          "legendFormat": "{{predicted_class}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_class_distribution_drift",
+          "legendFormat": "total variation distance",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 13,
+      "title": "Ticket length drift (KS on token counts)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 6},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_length_drift_ks_statistic",
+          "legendFormat": "KS statistic",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_length_drift_p_value",
+          "legendFormat": "p-value",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {}}, "overrides": []}
+    },
+    {
+      "id": 14,
+      "title": "Drift window fill",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "gridPos": {"x": 12, "y": 27, "w": 12, "h": 6},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+          "expr": "tickets_drift_window_rows",
+          "legendFormat": "requests buffered",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {}}, "overrides": []}
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+.git
+.github
+artifacts
+tests
+scripts
+monitoring
+**/__pycache__
+*.md
+.venv

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+artifacts/*.joblib
+artifacts/*.json
+artifacts/*.csv
+.DS_Store
+*.egg-info/
