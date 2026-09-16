@@ -9,14 +9,12 @@ The model is boring on purpose. Everything around the model is the point — and
 the monitoring is where it gets genuinely interesting.
 
 ```
-        train.py ──► artifacts/ ───────► Docker image ──► FastAPI ──► /metrics
-       (offline)     model.joblib         (immutable)     (online)       │
-                     metrics.json              ▲                          ▼
-                     reference_sample.csv      │                    Prometheus ──► Grafana
-                     drift_reference.json      │                          │
-                          │                    │                       alerts.yml
-                   quality gate ───────────────┘
-                     (CI/pytest)
+        train.py ──► artifacts/ ──► quality gate ──► Docker image ──► FastAPI ──► /metrics
+       (offline)     model.joblib    (CI/pytest)      (immutable)      (online)       │
+                     metrics.json         │            same artifact                  ▼
+                     reference_sample.csv │            the gate passed           Prometheus ──► Grafana
+                     drift_reference.json │                                            │
+                                     fails ──► nothing ships                      alerts.yml
 ```
 
 ## Quick start
@@ -151,6 +149,8 @@ pattern.
 ### 4. CI is a quality gate, not just a test run
 
 `.github/workflows/ci.yml`: lint → train → **quality gate** → contract tests → build.
+CI answers "is this commit sound?" and **never pushes or deploys**; releasing is
+[§6](#6-cd-is-separate-and-tag-triggered).
 
 `tests/test_model_quality.py` asserts the freshly trained model clears `MIN_MACRO_F1`,
 `MIN_ACCURACY` and — separately — `MIN_PER_CLASS_F1` **for every class**. Macro-F1 and
@@ -161,6 +161,13 @@ per class must route correctly, and formatting must not change a decision.
 The image build job `needs: test`. **A model that fails the gate never becomes an image.**
 That one line of YAML is the difference between "we have tests" and "we have a gate".
 
+The gate only means something if the model it validated is the model that ships. CI trains
+**once**, uploads `artifacts/`, and the build job downloads that exact artifact and copies
+it into the image — so the gate and the image are talking about the same model. The smoke
+test then asserts the running container reports the `model_version` the gate signed off on.
+(Training inside `docker build` instead would quietly produce a *second* model, leaving the
+gate to validate an artifact that never reaches production.)
+
 The thresholds sit at 0.80 against a model that scores **0.845**, because the ceiling on
 this corpus is around 0.86 by construction: 4% of labels are noise, 12% of tickets are
 genuinely ambiguous between two queues, 8% are vague one-liners. An unreachable gate gets
@@ -169,8 +176,45 @@ moving the bar is a reviewable commit rather than someone's Friday-afternoon jud
 
 ### 5. The image is the unit of deployment
 
-`docker build` runs `python -m tickets.train`, so the model is baked in. The image tag *is*
-the model version: reproducible, immutable, rollback = redeploy the previous tag.
+The model is baked into the image — copied in from the training run that passed the quality
+gate, not retrained during the build. The image tag *is* the model version: reproducible,
+immutable, rollback = redeploy the previous tag.
+
+Because the build copies rather than trains, `artifacts/` must exist first. `make image`
+and `make up` train for you; a bare `docker build` on a clean checkout fails with a clear
+message instead of shipping an image with no model in it.
+
+### 6. CD is separate, and tag-triggered
+
+`.github/workflows/cd.yml` runs on a `v*` tag, not on every merge — because "this code is
+good" and "ship it now" are different decisions, and only one of them should be made by
+merging a PR.
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0     # release
+```
+
+train → **quality gate** → build → smoke test → push to `ghcr.io`. Three properties worth
+naming:
+
+- **It retrains rather than reusing CI's artifact.** CI's run may be days old and its
+  artifact expires, so a release that depended on it would not be reproducible from its
+  own tag. CD's release is reproducible from the tag alone — and the gate runs again, so
+  nothing ships unvalidated.
+- **The smoke test runs before the push.** The image is built with `load: true`, tested
+  locally, and only then pushed. A broken release never reaches the registry.
+- **One tag names one model.** The git tag, the image tag and the `model_version` all
+  refer to the same artifact, recorded on the image as `ml.model.version` /
+  `ml.model.macro_f1` labels. Rollback is `docker pull` of the previous tag — no rebuild,
+  no retrain.
+
+`scripts/smoke_test.sh` is shared by both workflows so they cannot drift: it asserts the
+running container reports the *exact* `model_version` the gate signed off on.
+
+CD stops at a pushed image. There is no deploy step because this repo has nowhere to
+deploy to, and a placeholder that pretends otherwise would be the dishonest kind of
+scaffolding. Adding one means a `deploy:` job with `environment: production` (for the
+approval gate and deployment history) that pulls the tag.
 
 The trade-off, stated plainly: retraining requires a rebuild, and the same image cannot be
 repointed at a newer model. The alternative is a **model registry** (MLflow, S3 + metadata
@@ -192,7 +236,10 @@ tickets/
   api.py          FastAPI service
 tests/            text, data, quality gate, API contracts, drift detection (51 tests)
 monitoring/       prometheus.yml, alerts.yml, Grafana provisioning + dashboard
-scripts/          traffic simulator (--shift to drift it)
+scripts/          traffic simulator (--shift to drift it), shared image smoke test
+.github/workflows/
+  ci.yml          every PR + main: lint, types, gate, build. Never pushes.
+  cd.yml          `v*` tags: retrain, re-gate, build, smoke test, push to GHCR
 ```
 
 The corpus is synthetic and generated locally: deterministic, no network, and `shift`

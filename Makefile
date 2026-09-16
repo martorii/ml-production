@@ -1,4 +1,4 @@
-.PHONY: help install train test lint typecheck serve up down logs traffic drift clean
+.PHONY: help install train test lint typecheck image serve up down logs traffic drift clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -20,10 +20,15 @@ typecheck: ## Mypy
 test: ## Run the full test suite (includes the model quality gate)
 	pytest -v
 
+image: train ## Train, then build the image around that exact model
+	docker build -t ticket-router:local .
+
 serve: ## Run the API locally with reload
 	uvicorn tickets.api:app --reload --port 8000
 
-up: ## Start API + Prometheus + Grafana
+# Trains first: the Dockerfile copies artifacts/ rather than training, so the compose
+# build needs a model on disk to bake in.
+up: train ## Start API + Prometheus + Grafana
 	docker compose up -d --build
 	@echo "API      http://localhost:8000/docs"
 	@echo "Metrics  http://localhost:8000/metrics"

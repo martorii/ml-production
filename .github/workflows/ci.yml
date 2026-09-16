@@ -1,5 +1,9 @@
 name: CI
 
+# Proves a commit is sound: lint, types, a trained model that clears the quality gate,
+# and an image that builds and serves that model. It never pushes and never deploys —
+# releasing is cd.yml, triggered by a `v*` tag.
+
 on:
   push:
     branches: [main]
@@ -28,6 +32,9 @@ jobs:
       - name: Type check
         run: mypy tickets scripts
 
+      # Trained exactly once per run. The artifacts this step writes are the ones the
+      # gate validates and the ones the image is built around — no second training run
+      # anywhere in the pipeline, so the tested model is the shipped model.
       - name: Train model
         run: python -m tickets.train
 
@@ -42,16 +49,23 @@ jobs:
       - name: Publish metrics to the job summary
         if: always()
         run: |
-          echo '### Model metrics' >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          cat artifacts/metrics.json >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '### Model metrics'
+            echo '```json'
+            cat artifacts/metrics.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
+      # `always()`, so this may hold a model that FAILED the gate — it is for inspecting
+      # a red build, never for releasing. The releasable artifact is CD's
+      # `release-artifacts`, which is uploaded only on success. Do not consume this one
+      # from another workflow.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: model-artifacts
+          name: ci-artifacts-unverified
           path: artifacts/
+          retention-days: 7
 
   build:
     name: Build image
@@ -60,17 +74,18 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
+
+      # The gated model, not a fresh one. The Dockerfile COPYs artifacts/ instead of
+      # training, so this download is what gets baked into the image.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-artifacts-unverified
+          path: artifacts/
+
       - name: Build Docker image
         run: docker build -t ticket-router:${{ github.sha }} .
+
+      # Shared with CD, so the two cannot drift: it asserts the image serves the exact
+      # model version the gate signed off on, not merely that it serves *a* model.
       - name: Smoke test the image
-        run: |
-          docker run -d --name smoke -p 8000:8000 ticket-router:${{ github.sha }}
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/ready && break || sleep 2
-          done
-          curl -sf http://localhost:8000/health | tee /dev/stderr | grep -q '"model_loaded":true'
-          curl -sf -X POST http://localhost:8000/predict \
-            -H 'Content-Type: application/json' \
-            -d '{"text":"i was charged twice for my subscription this month"}' \
-            | tee /dev/stderr | grep -q '"label":"billing"'
-          docker rm -f smoke
+        run: scripts/smoke_test.sh ticket-router:${{ github.sha }}

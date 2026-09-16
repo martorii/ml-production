@@ -1,0 +1,176 @@
+name: CD
+
+# Release, triggered by a version tag on main:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# CI proves a commit is sound on every PR. CD turns one tagged commit into a released
+# image: retrain, re-gate, build, smoke test, push to GHCR. The git tag, the image tag
+# and the model version all name the same thing, so rollback is redeploying an earlier
+# tag — no rebuild, no retrain, nothing to reconstruct.
+#
+# Retraining rather than reusing CI's artifact is deliberate: CI's run may be days old
+# and its artifact expires, and a release should be reproducible from its own tag alone.
+# The gate runs again here, so a release is never unvalidated.
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual re-release, for rolling forward a fix without moving a tag.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or SHA to release (defaults to this branch)"
+        required: false
+        type: string
+
+# A release must not race another release to the same tag.
+concurrency:
+  group: cd-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  train:
+    name: Train and gate the release model
+    runs-on: ubuntu-latest
+    outputs:
+      model_version: ${{ steps.version.outputs.model_version }}
+      macro_f1: ${{ steps.version.outputs.macro_f1 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          # train.py stamps the model with the short SHA; without history that is "nogit".
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      # Lint and types are a CI concern and already passed to get here, so they are not
+      # repeated. What is repeated is everything that could make a *model* unfit to ship.
+      - name: Train the release model
+        run: python -m tickets.train
+
+      - name: Model quality gate
+        run: pytest tests/test_model_quality.py -v
+
+      - name: Data, text, API and drift tests
+        run: pytest tests/test_data.py tests/test_text.py tests/test_api.py tests/test_monitoring.py -v
+
+      - name: Read model version
+        id: version
+        run: |
+          version=$(python -c 'import json;print(json.load(open("artifacts/metrics.json"))["model_version"])')
+          f1=$(python -c 'import json;print(json.load(open("artifacts/metrics.json"))["metrics"]["macro_f1"])')
+          echo "model_version=${version}" >> "$GITHUB_OUTPUT"
+          echo "macro_f1=${f1}" >> "$GITHUB_OUTPUT"
+
+      # Only uploaded on success, unlike CI's `if: always()` debugging upload: the
+      # release artifact must never be a model that failed the gate.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts/
+          retention-days: 90
+
+  release:
+    name: Build, smoke test and push
+    runs-on: ubuntu-latest
+    needs: train
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      # The gated model. The Dockerfile copies artifacts/ rather than training, so this
+      # download is exactly what gets baked in.
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        run: |
+          ref="${{ github.event.inputs.ref || github.ref_name }}"
+          image="${REGISTRY}/${IMAGE_NAME}"
+          image=$(echo "$image" | tr '[:upper:]' '[:lower:]')   # GHCR requires lowercase
+          {
+            echo "image=${image}"
+            echo "version_tag=${image}:${ref}"
+            echo "sha_tag=${image}:sha-${GITHUB_SHA::7}"
+            echo "ref=${ref}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Built and loaded locally first: the image is smoke tested before it is pushed,
+      # so a broken release never reaches the registry at all.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.version_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.ref }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            ml.model.version=${{ needs.train.outputs.model_version }}
+            ml.model.macro_f1=${{ needs.train.outputs.macro_f1 }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the release image
+        run: scripts/smoke_test.sh ${{ steps.meta.outputs.version_tag }}
+
+      # Past this line the image is validated. Pushing the same local image under both
+      # tags, rather than rebuilding, so every tag is the identical tested bytes.
+      - name: Push to GHCR
+        run: |
+          docker tag ${{ steps.meta.outputs.version_tag }} ${{ steps.meta.outputs.sha_tag }}
+          docker push ${{ steps.meta.outputs.version_tag }}
+          docker push ${{ steps.meta.outputs.sha_tag }}
+
+      - name: Release summary
+        run: |
+          {
+            echo "### Released \`${{ steps.meta.outputs.ref }}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.meta.outputs.version_tag }}\` |"
+            echo "| Also tagged | \`${{ steps.meta.outputs.sha_tag }}\` |"
+            echo "| Model version | \`${{ needs.train.outputs.model_version }}\` |"
+            echo "| Macro F1 | ${{ needs.train.outputs.macro_f1 }} |"
+            echo "| Commit | ${{ github.sha }} |"
+            echo
+            echo "Pull it:"
+            echo '```bash'
+            echo "docker pull ${{ steps.meta.outputs.version_tag }}"
+            echo '```'
+            echo
+            echo "Rollback: re-run this workflow against the previous tag, or deploy that tag's image directly."
+          } >> "$GITHUB_STEP_SUMMARY"

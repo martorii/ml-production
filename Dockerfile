@@ -12,10 +12,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tickets/ ./tickets/
 
-# The model is baked into the image at build time. That makes the image a single
-# immutable, reproducible unit: this tag == this model. See README for the
+# The model is baked into the image, but it is NOT trained here: it is copied in from
+# the CI job that trained it and ran the quality gate against it. Training during the
+# build would produce a second, different model — the gate would then be validating an
+# artifact that never ships. Copying makes the tested model the shipped model, and keeps
+# the image a single immutable unit: this tag == this model. See README for the
 # trade-off against loading from a model registry at startup.
-RUN python -m tickets.train
+#
+# Build locally with `make image` (or `make train` first); a bare `docker build` with no
+# artifacts/ present fails the check below rather than silently shipping no model.
+COPY artifacts/ ./artifacts/
+
+RUN test -f artifacts/model.joblib && test -f artifacts/metrics.json \
+    && test -f artifacts/drift_reference.json \
+    || (echo "ERROR: artifacts/ incomplete — run 'python -m tickets.train' before building" >&2; exit 1)
 
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
